@@ -245,7 +245,12 @@ class ZhiyuanEnv(gym.Env):
             rgb = np.zeros((viewport.height, viewport.width, 3), dtype=np.uint8)
             mujoco.mj_render(self.model, self.data, rgb)
             return rgb[::-1, :, :]
-        return None
+        # 修改render方法中human模式的部分：
+        elif self.render_mode == "human":
+            if self.viewer is None:
+                self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
+            self.viewer.sync()  # 仅同步数据，不阻塞
+
 
     def close(self):
         if self.viewer is not None:
