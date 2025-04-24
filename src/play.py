@@ -13,18 +13,18 @@ def play():
     # 设置文件路径
     xml_path = "../models/zhiyuan_scene.xml"
     dataset_path = "../data/walking_dataset.csv"
-    checkpoint_path = "../checkpoints/ppo_checkpoint_3936000_steps.zip"
+    checkpoint_path = "../checkpoints/best/best_model"
     policy_kwargs = {
     "features_extractor_class": CustomPolicy,
-    "features_extractor_kwargs": {"features_dim": 256},  # 根据需要调整
-    "net_arch": [dict(pi=[128, 64], vf=[128, 64])]  # 可以根据需要修改网络结构
+    "features_extractor_kwargs": {"features_dim": 512},  # 根据需要调整
+    "net_arch": [dict(pi=[512, 384, 256, 128], vf=[512, 384, 256, 128])] # 可以根据需要修改网络结构
     }   
 
     # 加载训练好的模型
     print(f"加载断点: {checkpoint_path}")
     custom_objects = {
     "policy_kwargs": policy_kwargs,
-    "clip_range": 0.2,  # 与 train.py 中的值一致
+    "clip_range": 0.15,  # 与 train.py 中的值一致
     "lr_schedule": lambda _: 3e-4  # 固定学习率，与 train.py 一致
     }
     model = PPO.load(checkpoint_path, env=None, custom_objects=custom_objects)
@@ -67,7 +67,7 @@ def play():
             env.model.jnt_range[env.model.joint(env.joint_names[j]).id][1] - home_qpos[joint_idx]
         )
 
-    env.data.qvel[:3] = [0, 0, 0]
+    env.data.qvel[:3] = [1.0, 0, 0]
     env.data.qvel[3:6] = base_ang_vel
     for j, joint_idx in enumerate(env.joint_vel_indices):
         env.data.qvel[joint_idx] = vel[j]

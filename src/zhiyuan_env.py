@@ -29,6 +29,7 @@ class ZhiyuanEnv(gym.Env):
         self.render_mode = render_mode
         self.viewer = None
         self.render_context = None
+        self._prev_contact = None
 
         # 动作空间（29个执行器）
         n_actuators = 29
@@ -47,6 +48,9 @@ class ZhiyuanEnv(gym.Env):
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32
         )
+                
+        #print(f"Observation space shape: {self.observation_space.shape}") 
+        # 应为 (14+14+3+4+3=38,) 即 (38,)    
 
         self.joint_names = [
             'left_hip_pitch_joint', 'left_hip_roll_joint', 'left_hip_yaw_joint',
@@ -67,13 +71,14 @@ class ZhiyuanEnv(gym.Env):
         self.max_episode_steps = 1000
         self._steps = 0
 
-        self.target_com_z = 0.7
+        self.target_com_z = 0.6
         self.stable_threshold = 0.05
-        self.max_tilt_angle = np.deg2rad(45)
+        self.max_tilt_angle = np.deg2rad(70)
 
         self.feet_indices = [
             self.model.geom('left_ankle_roll').id,
             self.model.geom('right_ankle_roll').id
+        
         ]
 
     def _load_dataset(self):
@@ -124,7 +129,7 @@ class ZhiyuanEnv(gym.Env):
                 self.model.jnt_range[self.model.joint(self.joint_names[j]).id][1] - home_qpos[joint_idx]
             )
 
-        self.data.qvel[:3] = [0, 0, 0]
+        self.data.qvel[:3] = [1.0, 0, 0]
         self.data.qvel[3:6] = base_ang_vel
         for j, joint_idx in enumerate(self.joint_vel_indices):
             self.data.qvel[joint_idx] = vel[j]
@@ -134,6 +139,9 @@ class ZhiyuanEnv(gym.Env):
 
         mujoco.mj_forward(self.model, self.data)
         self._steps = 0
+        
+        self._prev_contact = np.zeros(2, dtype=bool)
+
         return self._get_obs(), {}
 
     def _euler_to_quat(self, euler):
@@ -164,31 +172,49 @@ class ZhiyuanEnv(gym.Env):
         self.data.ctrl[:] = action
         for _ in range(self.frame_skip):
             mujoco.mj_step(self.model, self.data)
+        
+        # 计算当前接触力
+        contact_forces = np.zeros(2, dtype=np.float32)
+        for j, body_name in enumerate(['link_left_ankle_roll', 'link_right_ankle_roll']):
+            body_id = self.model.body(body_name).id
+            geom_start = self.model.body_geomadr[body_id]
+            geom_num = self.model.body_geomnum[body_id]
+            for k in range(geom_start, geom_start + geom_num):
+                geom_type = self.model.geom(k).type
+                geom_contype = self.model.geom(k).contype
+                if geom_type == mujoco.mjtGeom.mjGEOM_SPHERE and geom_contype == 2:
+                    contact_forces[j] = self.data.cfrc_ext[k][2]
+                    break
+        
+        current_contact = contact_forces > 1.0
+        contact_freq = np.sum(current_contact ^ self._prev_contact) 
+        self._prev_contact = current_contact.copy()
 
         # 计算奖励
-        reward = self.compute_reward()  # 直接调用compute_reward
+        reward = self.compute_reward(contact_forces,current_contact)  # 将contact_forces传递给奖励函数
         terminated = self._check_termination()
         truncated = self._steps >= self.max_episode_steps
         self._steps += 1
         obs = self._get_obs()
 
-        # 将奖励传递到 info 中
         info = {"com_z": self.data.subtree_com[self.model.body('x1-body').id][2], "reward": reward}
-        
         return obs, reward, terminated, truncated, info
 
-
-    def compute_reward(self):
+    def compute_reward(self,contact_forces,current_contact):
+    # 质心高度奖励（目标高度0.7米）
         com_z = self.data.subtree_com[self.model.body('x1-body').id][2]
-        com_reward = np.exp(-10 * abs(com_z - self.target_com_z))
+        com_reward = np.exp(-5 * abs(com_z - 0.6))
 
+        # 质心速度惩罚（鼓励速度归零）
+        com_vel = np.linalg.norm(self.data.sensor('body-linear-vel').data)
+        com_vel_penalty = -2 * com_vel
+
+        # 姿态稳定性奖励（鼓励直立）
         body_quat = np.array(self.data.sensor('body-orientation').data, dtype=np.float32)
         quat_error = 1 - np.inner(body_quat, np.array([1, 0, 0, 0], dtype=np.float32))**2
         quat_reward = np.exp(-5 * quat_error)
 
-        body_vel = np.linalg.norm(np.array(self.data.sensor('body-linear-vel').data, dtype=np.float32))
-        vel_reward = np.exp(-2 * body_vel)
-
+        # 双脚接触奖励
         contact_forces = np.zeros(2, dtype=np.float32)
         for j, body_name in enumerate(['link_left_ankle_roll', 'link_right_ankle_roll']):
             body_id = self.model.body(body_name).id
@@ -199,8 +225,14 @@ class ZhiyuanEnv(gym.Env):
                     contact_forces[j] = np.array(self.data.cfrc_ext[k][2], dtype=np.float32)
                     break
         contact = contact_forces > 1.0
-        contact_reward = 1.0 if np.all(contact) else 0.5
+        if np.all(contact):
+            contact_reward = 1.0  # 两脚着地
+        elif np.any(contact):
+            contact_reward = 0.5  # 单脚着地
+        else:
+            contact_reward = -0.5  # 两脚不着地
 
+        # 脚部速度惩罚（鼓励静止）
         feet_vel = np.zeros((2, 3), dtype=np.float32)
         for j, body_name in enumerate(['link_left_ankle_roll', 'link_right_ankle_roll']):
             body_id = self.model.body(body_name).id
@@ -210,18 +242,44 @@ class ZhiyuanEnv(gym.Env):
                 if self.model.geom(k).type == mujoco.mjtGeom.mjGEOM_SPHERE and self.model.geom(k).contype == 2:
                     feet_vel[j] = np.array(self.data.geom_xvelp[k][:3], dtype=np.float32)
                     break
-        slide_penalty = -np.sum(np.square(feet_vel * contact[:, None]))
+        feet_vel_penalty = -np.sum(np.square(feet_vel))
 
+        # 髋关节位置惩罚（鼓励默认站立姿势）
         hip_indices = [self.model.joint(name).qposadr[0] for name in ['left_hip_roll_joint', 'left_hip_yaw_joint', 'right_hip_roll_joint', 'right_hip_yaw_joint']]
         hip_pos = np.array([self.data.qpos[i] for i in hip_indices], dtype=np.float32)
         hip_penalty = -np.sum(np.square(hip_pos))
 
+        # 动作平滑惩罚
         action_penalty = -0.001 * np.sum(np.square(np.array(self.data.ctrl, dtype=np.float32)))
+        
+        # 姿态倾斜奖励（鼓励站直/略向前弯腰，惩罚后倒）
+        pitch_angle = np.arcsin(2 * (body_quat[0] * body_quat[2] - body_quat[1] * body_quat[3]))  # 提取俯仰角（pitch）
+        pitch_reward = np.exp(-5 * (pitch_angle - 0.1)**2) - 0.5 * np.clip(pitch_angle, 0, np.pi/4)  # 目标略前倾0.1弧度，惩罚后倒
+
+        forward_vel = self.data.sensor('body-linear-vel').data[0]  # x 轴速度
+        deceleration_reward = -2 * abs(forward_vel)  # 奖励速度接近 0
+        
+        contact_freq = np.sum(current_contact ^ self._prev_contact)  # 接触切换频率
+        contact_freq_reward = 0.3 * contact_freq  # 奖励频繁接触
+        
+        # 存活奖励
         alive_reward = 1.0
 
-        total_reward = (2.0 * com_reward + 1.0 * quat_reward + 1.0 * vel_reward +
-                        0.5 * contact_reward + 0.2 * slide_penalty + 0.2 * hip_penalty +
-                        0.1 * action_penalty + 1.0 * alive_reward)
+        # 总奖励（权重初步设计，需调优）
+        total_reward = (
+            3.0 * com_reward +          # 质心高度
+            1.0 * com_vel_penalty +     # 质心速度
+            2.0 * quat_reward +         # 姿态
+            1.5 * contact_reward +      # 脚部接触
+            0.1 * feet_vel_penalty +    # 脚部速度
+            0.2 * hip_penalty +         # 髋关节
+            0.1 * action_penalty +      # 动作平滑
+            10.0 * alive_reward+         # 存活
+            1.0 * pitch_reward+
+            1.0 * deceleration_reward+
+            0.3 * contact_freq_reward
+        )
+
         return total_reward
 
     def _check_termination(self):
@@ -229,7 +287,7 @@ class ZhiyuanEnv(gym.Env):
         body_quat = self.data.sensor('body-orientation').data
         tilt_error = 2 * np.arccos(np.abs(body_quat[0]))
         body_vel = np.linalg.norm(self.data.sensor('body-linear-vel').data)
-        if com_z < 0.5 or tilt_error > self.max_tilt_angle:
+        if com_z < 0.3 or com_z > 0.9 or tilt_error > self.max_tilt_angle:
             return True
         if (abs(com_z - self.target_com_z) < self.stable_threshold and
                 tilt_error < np.deg2rad(5) and
