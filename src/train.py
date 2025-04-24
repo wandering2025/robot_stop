@@ -19,22 +19,22 @@ import sys  # 新增
 from datetime import datetime  # 如果尚未导入
 
 class CustomPolicy(BaseFeaturesExtractor):
-    def __init__(self, observation_space, features_dim=512):
+    def __init__(self, observation_space, features_dim=128):
         super().__init__(observation_space, features_dim)
         # 确保第一层输入维度匹配观察空间
         self.net = nn.Sequential(
-            nn.Linear(observation_space.shape[0], 512),  # 这里必须是观察空间维度
-            nn.LayerNorm(512),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(512, 384),
-            nn.LayerNorm(384),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(384, 256),
+            nn.Linear(observation_space.shape[0], 256),  # 这里必须是观察空间维度
             nn.LayerNorm(256),
-            nn.ReLU(),
-            nn.Linear(256, features_dim),
+            nn.ELU(),
+            #nn.Dropout(0.2),
+            nn.Linear(256, 128),
+            nn.LayerNorm(128),
+            nn.ELU(),
+            #nn.Dropout(0.2),
+            #nn.Linear(384, 256),
+            #nn.LayerNorm(256),
+            #nn.ReLU(),
+            nn.Linear(128, features_dim),
             nn.Tanh()
         )
 
@@ -219,7 +219,7 @@ def train():
             total_eval_reward = 0
 
             # 运行评估 episode（最多350步）
-            for eval_step in range(350):
+            for eval_step in range(800):
                 action, _ = model.predict(obs, deterministic=False)  # 使用提取出的 obs
                 step_result = env.step(action)  # 返回 (obs, reward, terminated, truncated, info)
                 obs = step_result[0]  # 提取新的 obs

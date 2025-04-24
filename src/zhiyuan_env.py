@@ -174,24 +174,31 @@ class ZhiyuanEnv(gym.Env):
             mujoco.mj_step(self.model, self.data)
         
         # 计算当前接触力
-        contact_forces = np.zeros(2, dtype=np.float32)
-        for j, body_name in enumerate(['link_left_ankle_roll', 'link_right_ankle_roll']):
-            body_id = self.model.body(body_name).id
-            geom_start = self.model.body_geomadr[body_id]
-            geom_num = self.model.body_geomnum[body_id]
-            for k in range(geom_start, geom_start + geom_num):
-                geom_type = self.model.geom(k).type
-                geom_contype = self.model.geom(k).contype
-                if geom_type == mujoco.mjtGeom.mjGEOM_SPHERE and geom_contype == 2:
-                    contact_forces[j] = self.data.cfrc_ext[k][2]
-                    break
+# 获取地面 geom id
+        floor_id = self.model.geom('floor').id
         
-        current_contact = contact_forces > 1.0
-        contact_freq = np.sum(current_contact ^ self._prev_contact) 
+        # 获取脚部的 sphere geom id
+        left_foot_geom_ids = [self.model.geom(f'left_ankle_roll_sphere_{i}').id for i in range(4)]
+        right_foot_geom_ids = [self.model.geom(f'right_ankle_roll_sphere_{i}').id for i in range(4)]
+        
+        # 检测左脚和右脚是否有接触
+        left_contact = False
+        right_contact = False
+        for i in range(self.data.ncon):
+            contact = self.data.contact[i]
+            geom1, geom2 = contact.geom1, contact.geom2
+            if (geom1 == floor_id and geom2 in left_foot_geom_ids) or (geom1 in left_foot_geom_ids and geom2 == floor_id):
+                left_contact = True
+            if (geom1 == floor_id and geom2 in right_foot_geom_ids) or (geom1 in right_foot_geom_ids and geom2 == floor_id):
+                right_contact = True
+        
+        current_contact = np.array([left_contact, right_contact], dtype=bool)
+        #print(current_contact)
+        contact_freq = np.sum(current_contact ^ self._prev_contact)
         self._prev_contact = current_contact.copy()
 
         # 计算奖励
-        reward = self.compute_reward(contact_forces,current_contact)  # 将contact_forces传递给奖励函数
+        reward = self.compute_reward(current_contact)  # 将contact_forces传递给奖励函数
         terminated = self._check_termination()
         truncated = self._steps >= self.max_episode_steps
         self._steps += 1
@@ -200,7 +207,7 @@ class ZhiyuanEnv(gym.Env):
         info = {"com_z": self.data.subtree_com[self.model.body('x1-body').id][2], "reward": reward}
         return obs, reward, terminated, truncated, info
 
-    def compute_reward(self,contact_forces,current_contact):
+    def compute_reward(self,current_contact):
     # 质心高度奖励（目标高度0.7米）
         com_z = self.data.subtree_com[self.model.body('x1-body').id][2]
         com_reward = np.exp(-5 * abs(com_z - 0.6))
@@ -215,16 +222,7 @@ class ZhiyuanEnv(gym.Env):
         quat_reward = np.exp(-5 * quat_error)
 
         # 双脚接触奖励
-        contact_forces = np.zeros(2, dtype=np.float32)
-        for j, body_name in enumerate(['link_left_ankle_roll', 'link_right_ankle_roll']):
-            body_id = self.model.body(body_name).id
-            geom_start = self.model.body_geomadr[body_id]
-            geom_num = self.model.body_geomnum[body_id]
-            for k in range(geom_start, geom_start + geom_num):
-                if self.model.geom(k).type == mujoco.mjtGeom.mjGEOM_SPHERE and self.model.geom(k).contype == 2:
-                    contact_forces[j] = np.array(self.data.cfrc_ext[k][2], dtype=np.float32)
-                    break
-        contact = contact_forces > 1.0
+        contact = current_contact > 1.0
         if np.all(contact):
             contact_reward = 1.0  # 两脚着地
         elif np.any(contact):
