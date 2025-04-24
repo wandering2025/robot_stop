@@ -65,7 +65,7 @@ def train():
     parser = argparse.ArgumentParser()
         # +++ 日志初始化代码 +++
     
-        start_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+    start_time = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = f"../logs/training_{start_time}.log"
     
     class TeeLogger:
