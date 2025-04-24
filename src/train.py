@@ -43,29 +43,47 @@ class CustomPolicy(BaseFeaturesExtractor):
 
 # 修改文件: `train.py` 中的 export_to_onnx 函数
 def export_to_onnx(model, output_path, input_shape):
-    device = next(model.policy.parameters()).device
-    
-    # 创建正确维度的输入（确保与观察空间匹配）
-    dummy_input = torch.randn(1, *input_shape).to(device)
-    
-    # 导出完整的actor网络（包含特征提取器）
-    model.policy.eval()  # 确保在eval模式
-    
-    torch.onnx.export(
-        model.policy,
-        dummy_input,
-        output_path,
-        opset_version=12,
-        input_names=["input"],
-        output_names=["output"],
-        dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}}
-    )
+    class WrappedPolicy(nn.Module):
+        def __init__(self, policy):
+            super().__init__()
+            self.policy = policy
 
+        def forward(self, x):
+            return self.policy(x, deterministic=True)  # 固定deterministic参数
+
+    device = torch.device("cpu")
+    model.policy = model.policy.to(device).eval()
+    
+    # 包装策略
+    wrapped_policy = WrappedPolicy(model.policy)
+    
+    with torch.no_grad():
+        for param in wrapped_policy.parameters():
+            param.requires_grad_(False)
+        
+        dummy_input = torch.randn(1, *input_shape, dtype=torch.float32).to(device)
+        
+        if hasattr(model.policy, 'reset_noise'):
+            model.policy.reset_noise()
+            model.policy.sde_mode = False
+        
+        torch.onnx.export(
+            wrapped_policy,  # 使用包装后的策略
+            dummy_input,
+            output_path,
+            opset_version=12,
+            input_names=["input"],
+            output_names=["output"],
+            dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},
+            do_constant_folding=True,
+            training=torch.onnx.TrainingMode.EVAL
+        )
+        
 def train():
     parser = argparse.ArgumentParser()
         # +++ 日志初始化代码 +++
     
-        start_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+    start_time = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = f"../logs/training_{start_time}.log"
     
     class TeeLogger:
@@ -167,7 +185,7 @@ def train():
         deterministic=True,
         render=False,
         n_eval_episodes=5,
-        callback_on_new_best=StopTrainingOnRewardThreshold(reward_threshold=2500, verbose=1)
+        callback_on_new_best=StopTrainingOnRewardThreshold(reward_threshold=10000, verbose=1)
     )
 
     # 训练并渲染
@@ -195,23 +213,29 @@ def train():
             # 每20次迭代进行一次可视化评估
             #if i % 20 == 0:
             # 重置可视化环境
-            obs = env.reset()[0]
+            # 重置可视化环境
+            reset_result = env.reset()  # 返回 (obs, info)
+            obs = reset_result[0]  # 提取 obs
             total_eval_reward = 0
-            
-            # 运行评估episode（最多350步）
+
+            # 运行评估 episode（最多350步）
             for eval_step in range(350):
-                action, _ = model.predict(obs)
-                obs, reward, terminated, truncated, _ = env.step(action)  # 单环境返回单个reward
-                total_eval_reward += reward  # 直接累加这个reward值
-                
+                action, _ = model.predict(obs, deterministic=False)  # 使用提取出的 obs
+                step_result = env.step(action)  # 返回 (obs, reward, terminated, truncated, info)
+                obs = step_result[0]  # 提取新的 obs
+                reward = step_result[1]
+                terminated = step_result[2]
+                truncated = step_result[3]
+                total_eval_reward += reward  # 直接累加这个 reward 值
+
                 # 更新可视化
-                if hasattr(viewer, 'is_running') and viewer.is_running():  # 确保viewer未关闭
+                if hasattr(viewer, 'is_running') and viewer.is_running():  # 确保 viewer 未关闭
                     viewer.sync()
                 time.sleep(1.0 / env.metadata["render_fps"])
-                
+
                 if terminated or truncated:
                     break
-                    
+
             print(f"Evaluation after {i} iterations - Total reward: {total_eval_reward:.2f}")
             
             # 正常训练信息打印
@@ -221,13 +245,19 @@ def train():
             print(f"Iteration {i}: Avg reward = {avg_reward:.2f}")
 
         # 在for循环结束后添加最终评估
+        # 在for循环结束后添加最终评估
         if 4999 % 100 != 0:  # 如果最后一次迭代不是评估周期
             # 执行最终评估
-            obs = env.reset()
+            reset_result = env.reset()  # 返回 (obs, info)
+            obs = reset_result[0]  # 提取 obs
             total_eval_reward = 0
             for eval_step in range(200):
                 action, _ = model.predict(obs)
-                obs, reward, terminated, truncated, _ = env.step(action)
+                step_result = env.step(action)
+                obs = step_result[0]  # 提取 obs
+                reward = step_result[1]
+                terminated = step_result[2]
+                truncated = step_result[3]
                 total_eval_reward += reward
                 if hasattr(viewer, 'is_running') and viewer.is_running():
                     viewer.sync()
@@ -235,21 +265,36 @@ def train():
                     break
             print(f"Final evaluation - Total reward: {total_eval_reward:.2f}")
                 
+# 在finally块中添加额外处理
     finally:
-        # 确保资源释放
         if viewer is not None:
             viewer.close()
         
         sys.stdout = original_stdout
         tee.close()
-            # 保存最终模型
+        
+        # 保存并重新加载模型以确保状态干净
         model.save("../checkpoints/ppo_final.zip")
-        model.policy.to("cpu")
+        
+        # 重新加载模型并显式设置参数
+        model = PPO.load(
+            "../checkpoints/ppo_final.zip",
+            device="cpu",
+            # 添加自定义对象处理
+            custom_objects={
+                'policy_kwargs': policy_kwargs,
+                'observation_space': env.observation_space,
+                'action_space': env.action_space
+            }
+        )
+        
+        # 显式设置策略网络模式
+        model.policy.eval()
+        for param in model.policy.parameters():
+            param.requires_grad_(False)
+        
+        # 执行导出
         export_to_onnx(model, onnx_path, env.observation_space.shape)
-        print("Training completed and model saved.")
-
-    if viewer is not None:
-        viewer.close()
 
 if __name__ == "__main__":
     train()
