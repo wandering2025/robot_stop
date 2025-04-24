@@ -118,7 +118,7 @@ class ZhiyuanEnv(gym.Env):
 
         # 设置初始位置（基于网格位置偏移）
         grid_x, grid_y = self.grid_pos
-        self.data.qpos[:3] = [grid_x * 1.5, grid_y * 1.5, 0.7]  # 网格间距1.5
+        self.data.qpos[:3] = [grid_x * 1.5, grid_y * 1.5, 0.6]  # 网格间距1.5
         self.data.qpos[3:7] = quat
         home_qpos = self.model.key_qpos[self.model.keyframe('home_default').id]
         self.data.qpos[7:] = home_qpos[7:].copy()
