@@ -14,6 +14,9 @@ from datetime import datetime
 from stable_baselines3.common.vec_env import DummyVecEnv
 import time
 from stable_baselines3.common.callbacks import EvalCallback, StopTrainingOnRewardThreshold
+# 在文件顶部导入模块处添加
+import sys  # 新增
+from datetime import datetime  # 如果尚未导入
 
 class CustomPolicy(BaseFeaturesExtractor):
     def __init__(self, observation_space, features_dim=512):
@@ -60,6 +63,31 @@ def export_to_onnx(model, output_path, input_shape):
 
 def train():
     parser = argparse.ArgumentParser()
+        # +++ 日志初始化代码 +++
+    
+        start_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = f"../logs/training_{start_time}.log"
+    
+    class TeeLogger:
+        def __init__(self, filename):
+            self.terminal = sys.stdout
+            self.log = open(filename, "a", buffering=1)  # 行缓冲模式
+            
+        def write(self, message):
+            self.terminal.write(message)
+            self.log.write(message)
+            
+        def flush(self):
+            self.terminal.flush()
+            self.log.flush()
+            
+        def close(self):
+            self.log.close()
+            
+    original_stdout = sys.stdout
+    tee = TeeLogger(log_file)
+    sys.stdout = tee
+
     parser.add_argument("--checkpoint_path", default="../checkpoints/ppo_checkpoint.zip")
     args = parser.parse_args()
 
@@ -212,7 +240,9 @@ def train():
         if viewer is not None:
             viewer.close()
         
-        # 保存最终模型
+        sys.stdout = original_stdout
+        tee.close()
+            # 保存最终模型
         model.save("../checkpoints/ppo_final.zip")
         model.policy.to("cpu")
         export_to_onnx(model, onnx_path, env.observation_space.shape)

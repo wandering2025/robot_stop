@@ -53,7 +53,7 @@ def play():
     # 重置环境并初始化状态
     env.reset(seed=None)
     grid_pos = env.grid_pos
-    env.data.qpos[:3] = [grid_pos[0] * 1.5, grid_pos[1] * 1.5, 0.7]  # 网格间距
+    env.data.qpos[:3] = [grid_pos[0] * 1.5, grid_pos[1] * 1.5, 0.6]  # 网格间距
     quat = env._euler_to_quat(base_euler)
     env.data.qpos[3:7] = quat
     home_qpos = env.model.key_qpos[env.model.keyframe('home_default').id]
